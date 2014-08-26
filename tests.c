@@ -12,6 +12,11 @@
 #include <pthread.h>
 
 #define MAX_CLIENTS 30000
+#if 1
+#define EDGE_TRIGGER 0
+#else
+#define EDGE_TRIGGER EPOLLET
+#endif
 
 int g_seq = 0;
 
@@ -136,7 +141,7 @@ static void init_server_sock(my_ipc_cb_t *cb)
     {
         printf("PANIC: cannot listen %s %d %d\n",__FILE__,__LINE__,errno);
     }
-    SOCK_EPOLL_DESCR(cb) = epoll_create(1);
+    SOCK_EPOLL_DESCR(cb) = epoll_create(10000);
 }
 
 static void init_client_socket(my_ipc_cb_t *cb)
@@ -277,24 +282,30 @@ static void do_sock_read(my_ipc_cb_t *cb,int fd)
 {
     int rc;
 
-    rc = read(fd,SOCK_SERVER_CB(cb).buffer,cb->buf_size);
-    if(rc > 0)
+    do
     {
-        //printf("read %d\n",rc);
-        cb->total_read += rc;
-    }
+        rc = read(fd,SOCK_SERVER_CB(cb).buffer,cb->buf_size);
+        if(rc > 0)
+        {
+            //printf("read %d\n",rc);
+            cb->total_read += rc;
+        }
+    }while(EDGE_TRIGGER);
 }
 
 static void do_sock_write(my_ipc_cb_t *cb,int fd)
 {
     int rc;
     sprintf(SOCK_SERVER_CB(cb).buffer,"JURA HOY%d",g_seq++);
-    rc = write(fd,SOCK_SERVER_CB(cb).buffer,cb->buf_size);
-    if(rc > 0)
+    do
     {
-        //printf("written %d\n",rc);
-        cb->total_written += rc;
-    }
+        rc = write(fd,SOCK_SERVER_CB(cb).buffer,cb->buf_size);
+        if(rc > 0)
+        {
+            //printf("written %d\n",rc);
+            cb->total_written += rc;
+        }
+    }while(EDGE_TRIGGER);
 }
 
 static void do_sock_test_left_side(my_ipc_cb_t *cb)
@@ -321,8 +332,8 @@ static void do_sock_test_left_side(my_ipc_cb_t *cb)
                new_sock = accept(SOCK_FDESCR(cb),&sa,&len);
                if(new_sock <= 0)
                {
-                  /* printf("a problem in accept %d\n",errno);
-                   exit(5);*/
+                   printf("a problem in accept %d\n",errno);
+                   /*exit(5);*/
                }
                else
                {
@@ -334,7 +345,7 @@ static void do_sock_test_left_side(my_ipc_cb_t *cb)
                if(new_sock > 0)
                {
                    do_sock_write(cb,new_sock);
-		   new_event.events = EPOLLIN | EPOLLOUT;
+		           new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
                    new_event.data.fd = new_sock;
                    epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,new_sock,&new_event);
                }
@@ -342,16 +353,16 @@ static void do_sock_test_left_side(my_ipc_cb_t *cb)
            else if(events[i].events & EPOLLIN)
            {
                do_sock_read(cb,events[i].data.fd);
-	       new_event.events = EPOLLIN | EPOLLOUT;
-               new_event.data.fd = events[i].data.fd;
-               epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,events[i].data.fd,&new_event);
+	           //new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
+               //new_event.data.fd = events[i].data.fd;
+               //epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,events[i].data.fd,&new_event);
            }
            else if(events[i].events & EPOLLOUT)
            {
                do_sock_write(cb,events[i].data.fd);
-	       new_event.events = EPOLLIN | EPOLLOUT;
-               new_event.data.fd = events[i].data.fd;
-               epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,events[i].data.fd,&new_event);
+	           //new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
+               //new_event.data.fd = events[i].data.fd;
+               //epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,events[i].data.fd,&new_event);
            }
            else
            {

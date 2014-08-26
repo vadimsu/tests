@@ -17,5 +17,5 @@ of connections: ~5600 (probably limitation at the laptop's side)
 Linux: After about 1000 connections, the CPU load grows sharply and gets to ~90% at each core,
 the number of connections reached: ~4500
 Ping times: 
-DPDK: 130-150ms
+DPDK: ~130ms
 Linux: ~250ms
