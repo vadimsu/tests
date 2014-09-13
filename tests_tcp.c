@@ -11,7 +11,7 @@
 #include <sys/ioctl.h> 
 #include <pthread.h>
 
-#define MAX_CLIENTS 30000
+#define MAX_CLIENTS 3000
 #if 1
 #define EDGE_TRIGGER 0
 #else
@@ -34,6 +34,7 @@ struct timeval start_tv;
 struct timeval end_tv;
 unsigned int total_written;
 unsigned int total_read;
+int fds[MAX_CLIENTS];
 
 static void clean_up(int fd);
 static void initiate_client_sockets();
@@ -44,6 +45,9 @@ static void register_end_of_test();
 
 int epoll_fd = 0;
 int listener_fd = 0;
+int client_idx = 0;
+int full_iterations = 0;
+static void clean_up(int fd);
 
 static void init_server_sock()
 {
@@ -118,6 +122,7 @@ static void init_client_socket()
     if(connect(fd,sa,len) < 0)
     {
     }
+    fds[client_idx++] = fd;
 }
 
 static void do_sock_read(int fd)
@@ -152,7 +157,7 @@ static void do_sock_write(int fd)
 
 static void do_sock_test_left_side()
 {
-    int i;
+    int i,iterations = 0;
 
     struct epoll_event events[MAX_CLIENTS+1];   
     struct epoll_event new_event;
@@ -215,6 +220,12 @@ static void do_sock_test_left_side()
 	      total_written = 0;
 	      total_read = 0;
 	      register_start_of_test();
+              iterations++;
+              if(iterations == full_iterations) {
+                  for(i = 0;i < client_idx;i++) {
+                      clean_up(fds[i]);
+                  }
+              }
        }  
    }
 }
@@ -257,7 +268,7 @@ static void init_client_sockets()
 
     for(i = 0;i < client_connections_number;i++)
     {
-	printf("init client socket %d\n",i);
+//	printf("init client socket %d\n",i);
         init_client_socket();
     }
 }
@@ -286,7 +297,8 @@ void init_test(int buf_sz,
                int clnt_side_pb,
                int srv_side_pb,
 	       	   unsigned int clnt_ip,
-		       unsigned int srv_ip)
+		       unsigned int srv_ip,
+               int iterations)
 {
     client_side_port_base = htons(clnt_side_pb);
     server_side_port_base = htons(srv_side_pb);
@@ -296,18 +308,23 @@ void init_test(int buf_sz,
     client_connections_number = clnt_conn_num;
     client_ip = clnt_ip;
     server_ip = srv_ip;
+    full_iterations = iterations;
 }
 
 int main(int argc, char **argv)
 {
-    if(argc != 9)
+    int iterations = 0;
+    if(argc < 9)
     {
         printf("Usage:  <buf_size> <instance_id> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip>\n");
         exit(1);
     }
+    if(argc == 10) {
+        iterations = atoi(argv[9]);
+    }
     printf("Entered: buf_size %d instance_id %d bytes rx/tx to print stats %d client conn num %d client port base %d server port base %d\n",
            atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]));
-    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),inet_addr(argv[7]),inet_addr(argv[8]));
+    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),inet_addr(argv[7]),inet_addr(argv[8]),iterations);
     do_test();
     return 0;
 }
