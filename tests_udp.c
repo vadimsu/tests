@@ -231,7 +231,7 @@ void init_test(int buf_size,
     buffer_size = buf_size;
     termination_criteria = term_criteria;
     connections_number = conn_number;
-    port_base = pbase;
+    //port_base = pbase;
     remote_port_base = remote_pbase;
     remote_ip = rmt_ip;
     ip2bind = ip;
