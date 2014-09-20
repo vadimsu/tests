@@ -21,6 +21,7 @@ unsigned short port_base = 0;
 unsigned short remote_port_base = 0;
 unsigned int ip2bind = 0;
 unsigned int remote_ip = 0;
+int receive_transmit_flags = 0;
 int connections_number = 0;
 struct timeval start_tv;
 struct timeval end_tv;
@@ -126,14 +127,14 @@ static void do_sock_test_left_side()
        events_occured = epoll_wait(epoll_fd,events,MAX_CLIENTS+1,-1);
        for(i = 0;i < events_occured;i++)
        {
-           if(events[i].events & EPOLLIN)
+           if((events[i].events & EPOLLIN)&&(receive_transmit_flags & 0x1))
            {
                do_sock_read(events[i].data.fd);
 	           //new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
                //new_event.data.fd = events[i].data.fd;
                //epoll_ctl(SOCK_EPOLL_DESCR(cb),EPOLL_CTL_ADD,events[i].data.fd,&new_event);
            }
-           if(events[i].events & EPOLLOUT)
+           if((events[i].events & EPOLLOUT)&&(receive_transmit_flags & 0x2))
            {
                do_sock_write(events[i].data.fd);
 	           //new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
@@ -224,7 +225,8 @@ void init_test(int buf_size,
                int pbase,
                int remote_pbase,
                unsigned int ip,
-               unsigned int rmt_ip)
+               unsigned int rmt_ip,
+               int rxtx_flags)
 {
     epoll_fd = epoll_create(10000);
     port_base = htons(pbase);
@@ -235,18 +237,19 @@ void init_test(int buf_size,
     remote_port_base = remote_pbase;
     remote_ip = rmt_ip;
     ip2bind = ip;
+    receive_transmit_flags  = rxtx_flags;
 }
 
 int main(int argc, char **argv)
 {
-    if(argc != 8)
+    if(argc != 9)
     {
         printf("Usage:  <buf_size> <bytes rx/tx to print stats> <conn num> <port base> <remote port base> <my ip> <peer ip>\n");
         exit(1);
     }
-    printf("Entered: buf_size %d bytes rx/tx to print stats %d conn num %d port base %d remote port base %d my ip %x ip 2 connect %x \n",
+    printf("Entered: buf_size %d bytes rx/tx to print stats %d conn num %d port base %d remote port base %d my ip %x ip 2 connect %x rxtx_flags %x\n",
            atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),inet_addr(argv[6]),inet_addr(argv[7]));
-    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),inet_addr(argv[6]),inet_addr(argv[7]));
+    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),inet_addr(argv[6]),inet_addr(argv[7]),atoi(argv[8]));
     do_test();
     return 0;
 }
