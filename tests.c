@@ -125,7 +125,6 @@ static void init_client_socket(cb_t *cb)
     new_event.events = EPOLLIN | EPOLLOUT;
     new_event.data.fd =  fd;
     epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,fd,&new_event);
-    //printf("%s %d\n",__FILE__,__LINE__);
     if((cb->type == 1)&&(connect(fd,sa,len) < 0)) {
     }
     cb->fds[cb->client_idx++] = fd;
@@ -159,7 +158,6 @@ static void do_udp_sock_read(cb_t *cb,int fd)
     {
     	rc = recvfrom(fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
         if(rc > 0) {
-            //printf("read %d\n",rc);
             __sync_fetch_and_add(&total_read,rc);
         }
         else {
@@ -176,7 +174,6 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
     {
         rc = write(fd,cb->buffer,cb->buf_size);
         if(rc > 0) {
-            //printf("written %d\n",rc);
             __sync_fetch_and_add(&total_written,rc);
         }
         else {
@@ -198,9 +195,7 @@ static void do_udp_sock_write(cb_t *cb,int fd)
     do
     {
     	rc = sendto(fd,cb->buffer,cb->buf_size,0,sa,sizeof(sockaddrin));
-        if(rc > 0)
-        {
-            //printf("written %d\n",rc);
+        if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
         }
         else {
@@ -254,24 +249,16 @@ static void do_sock_test_left_side(cb_t *cb)
                }
            }
            if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
-//printf("%s %d\n",__FILE__,__LINE__);
                if(cb->type == 1)
                    do_tcp_sock_read(cb,events[i].data.fd);
                else
                    do_udp_sock_read(cb,events[i].data.fd);
-               events[0].events = EPOLLIN | EDGE_TRIGGER;
-               events[0].data.fd = events[i].data.fd;
-               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,events[i].data.fd,&events[0]);
            }
            if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
-//printf("%s %d\n",__FILE__,__LINE__);
                if(cb->type == 1)
                    do_tcp_sock_write(cb,events[i].data.fd);
                else
                    do_udp_sock_write(cb,events[i].data.fd);
-               events[0].events = EPOLLOUT | EDGE_TRIGGER;
-               events[0].data.fd = events[i].data.fd;
-               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,events[i].data.fd,&events[0]);
            }
        }
        /*iterations++;
