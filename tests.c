@@ -50,6 +50,11 @@ int termination_criteria;
 uint64_t total_written = 0;
 uint64_t total_read = 0;
 
+#define RX_ON 0x1
+#define TX_ON 0x2
+#define MODE_TCP 1
+#define MODE_UDP 2
+
 cb_t *cbs = NULL;
 pthread_t *threads;
 
@@ -64,7 +69,7 @@ static void init_server_sock(cb_t *cb)
 
     cb->epoll_fd = epoll_create(10000);
 
-    if(cb->type != 1) {
+    if(cb->type != MODE_TCP) {
         return;
     }
 
@@ -122,10 +127,21 @@ static void init_client_socket(cb_t *cb)
     if(ioctl(fd,FIONBIO,(char *)&val)) {
         printf("cannot go non-blocking mode\n");
     }
-    new_event.events = EPOLLIN | EPOLLOUT;
+    new_event.events = 0;
+    if(cb->type != MODE_TCP) { 
+        if(cb->rxtx_flag & RX_ON)
+            new_event.events |= EPOLLIN;
+         if(cb->rxtx_flag & TX_ON)
+            new_event.events |= EPOLLOUT;
+    }
+    else {
+        new_event.events |= EPOLLIN;
+        if(cb->rxtx_flag & TX_ON)
+            new_event.events |= EPOLLOUT;
+    }
     new_event.data.fd =  fd;
     epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,fd,&new_event);
-    if((cb->type == 1)&&(connect(fd,sa,len) < 0)) {
+    if((cb->type == MODE_TCP)&&(connect(fd,sa,len) < 0)) {
     }
     cb->fds[cb->client_idx++] = fd;
 }
@@ -190,7 +206,7 @@ static void do_udp_sock_write(cb_t *cb,int fd)
     sprintf(cb->buffer,"JURA HOY%d",g_seq++);
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->server_side_port_base);
-    sockaddrin.sin_addr.s_addr = cb->client_ip;
+    sockaddrin.sin_addr.s_addr = cb->server_ip;
     sa = (struct sockaddr *)&sockaddrin;
     do
     {
@@ -213,8 +229,8 @@ static void do_sock_test_left_side(cb_t *cb)
     int events_occured,new_sock,len;
     struct sockaddr sa;
  
-    if(cb->type == 1) {
-        events[0].events = EPOLLIN | EPOLLOUT;
+    if(cb->type == MODE_TCP) {
+        events[0].events = EPOLLIN;
         events[0].data.fd = cb->listener_fd;
         epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&events[0]);
     }
@@ -237,25 +253,25 @@ static void do_sock_test_left_side(cb_t *cb)
                epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&new_event);
                if(new_sock > 0) {
                    new_event.events = EDGE_TRIGGER;
-                   if(cb->rxtx_flag & 0x2) {
+                   if(cb->rxtx_flag & TX_ON) {
                        do_tcp_sock_write(cb,new_sock);
                        new_event.events |= EPOLLOUT;
                    }
-                   if(cb->rxtx_flag & 0x1) {
+                   if(cb->rxtx_flag & RX_ON) {
   	               new_event.events |= EPOLLIN;
                    }
                    new_event.data.fd = new_sock;
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
-               if(cb->type == 1)
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & RX_ON)) {
+               if(cb->type == MODE_TCP)
                    do_tcp_sock_read(cb,events[i].data.fd);
                else
                    do_udp_sock_read(cb,events[i].data.fd);
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
-               if(cb->type == 1)
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & TX_ON)) {
+               if(cb->type == MODE_TCP)
                    do_tcp_sock_write(cb,events[i].data.fd);
                else
                    do_udp_sock_write(cb,events[i].data.fd);
@@ -367,7 +383,7 @@ void init_test(int buf_sz,
 
 int main(int argc, char **argv)
 {
-    int rxtx = 0x3;
+    int rxtx = RX_ON|TX_ON;
     if(argc < 9)
     {
         printf("Usage:  <buf_size> <number_of_threads> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip> <type (1-tcp,2-udp> [rxtx (0x1 - write, 0x2 - read)]\n");
