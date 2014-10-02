@@ -241,23 +241,37 @@ static void do_sock_test_left_side(cb_t *cb)
                new_event.data.fd = cb->listener_fd;
                epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&new_event);
                if(new_sock > 0) {
-                   do_tcp_sock_write(cb,new_sock);
-		           new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
+                   new_event.events = EDGE_TRIGGER;
+                   if(cb->rxtx_flag & 0x2) {
+                       do_tcp_sock_write(cb,new_sock);
+                       new_event.events |= EPOLLOUT;
+                   }
+                   if(cb->rxtx_flag & 0x1) {
+  	               new_event.events |= EPOLLIN;
+                   }
                    new_event.data.fd = new_sock;
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           if((events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
+//printf("%s %d\n",__FILE__,__LINE__);
                if(cb->type == 1)
                    do_tcp_sock_read(cb,events[i].data.fd);
                else
                    do_udp_sock_read(cb,events[i].data.fd);
+               events[0].events = EPOLLIN | EDGE_TRIGGER;
+               events[0].data.fd = events[i].data.fd;
+               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,events[i].data.fd,&events[0]);
            }
-           if((events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
+//printf("%s %d\n",__FILE__,__LINE__);
                if(cb->type == 1)
                    do_tcp_sock_write(cb,events[i].data.fd);
                else
                    do_udp_sock_write(cb,events[i].data.fd);
+               events[0].events = EPOLLOUT | EDGE_TRIGGER;
+               events[0].data.fd = events[i].data.fd;
+               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,events[i].data.fd,&events[0]);
            }
        }
        /*iterations++;
