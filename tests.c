@@ -6,6 +6,7 @@
 #include <sys/epoll.h> 
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h> 
@@ -46,8 +47,8 @@ typedef struct
 
 struct timeval start_tv;
 int termination_criteria;
-unsigned int total_written = 0;
-unsigned int total_read = 0;
+uint64_t total_written = 0;
+uint64_t total_read = 0;
 
 cb_t *cbs = NULL;
 pthread_t *threads;
@@ -288,7 +289,7 @@ static void print_test_results()
     
 //    printf("r%u w%u bytes in %d seconds %d usec\n",total_read,total_written,secs,usecs);
     if(secs > 0) {
-        printf("tx%u rx%u  bytes/sec\n",total_written/secs,total_read/secs);
+        printf("tx%"PRIu64" rx%"PRIu64"  bits/sec secs %d total written %"PRIu64" total_read %"PRIu64"\n",(total_written/secs)<<3,(total_read/secs)<<3,secs,total_written,total_read);
     }
 }
 
