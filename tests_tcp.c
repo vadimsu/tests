@@ -12,7 +12,7 @@
 #include <pthread.h>
 
 #define MAX_CLIENTS 3000
-#if 1
+#if 0
 #define EDGE_TRIGGER 0
 #else
 #define EDGE_TRIGGER EPOLLET
@@ -137,6 +137,9 @@ static void do_sock_read(int fd)
             //printf("read %d\n",rc);
             total_read += rc;
         }
+        else {
+            break;
+        }
     }while(EDGE_TRIGGER);
 }
 
@@ -151,6 +154,9 @@ static void do_sock_write(int fd)
         {
             //printf("written %d\n",rc);
             total_written += rc;
+        }
+        else {
+            break;
         }
     }while(EDGE_TRIGGER);
 }
@@ -239,7 +245,7 @@ static void print_test_results()
 {
     unsigned int secs = end_tv.tv_sec - start_tv.tv_sec;
     unsigned int usecs = end_tv.tv_usec - start_tv.tv_usec;
-    printf("r%u w%u bytes in %d seconds %d usec\n",total_read,total_written,secs,usecs);
+    printf("r%u w%u bytes in %d seconds %d usec client_side_port_base %d\n",total_read,total_written,secs,usecs,client_side_port_base);
     if(secs > 0)
     {
         printf("which is w%u r%u  bytes/sec\n",total_written/secs,total_read/secs);

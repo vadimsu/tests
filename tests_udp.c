@@ -26,7 +26,7 @@ int connections_number = 0;
 struct timeval start_tv;
 struct timeval end_tv;
 #define MAX_CLIENTS 30000
-#if 1
+#if 0
 #define EDGE_TRIGGER 0
 #else
 #define EDGE_TRIGGER EPOLLET
@@ -91,6 +91,9 @@ static void do_sock_read(int fd)
             //printf("read %d\n",rc);
             total_read += rc;
         }
+        else {
+            break;
+        }
     }while(EDGE_TRIGGER);
 }
 
@@ -111,6 +114,9 @@ static void do_sock_write(int fd)
         {
             //printf("written %d\n",rc);
             total_written += rc;
+        }
+        else {
+            break;
         }
     }while(EDGE_TRIGGER);
 }
@@ -172,7 +178,7 @@ static void print_test_results()
     printf("r%u w%u bytes in %d seconds %d usec\n",total_read,total_written,secs,usecs);
     if(secs > 0)
     {
-        printf("which is w%u r%u  bytes/sec\n",total_written/secs,total_read/secs);
+        printf("which is w%u r%u  bytes/sec, port#%d\n",total_written/secs,total_read/secs,htons(port_base));
     }
 }
 
