@@ -40,7 +40,8 @@ typedef struct
     int epoll_fd;
     int listener_fd;
     int client_idx;
-    int full_iterations;
+    int type;
+    int rxtx_flag;
 }cb_t;
 
 struct timeval start_tv;
@@ -59,6 +60,12 @@ static void init_server_sock(cb_t *cb)
     int len;
     int val; 
     struct sockaddr_in sockaddrin;
+
+    cb->epoll_fd = epoll_create(10000);
+
+    if(cb->type != 1) {
+        return;
+    }
 
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->client_side_port_base);
@@ -85,7 +92,6 @@ static void init_server_sock(cb_t *cb)
         printf("PANIC: cannot listen %s %d %d\n",__FILE__,__LINE__,errno);
     }
     printf("listener created %d\n",ntohs(sockaddrin.sin_port));
-    cb->epoll_fd = epoll_create(10000);
 }
 
 static void init_client_socket(cb_t *cb)
@@ -96,6 +102,7 @@ static void init_client_socket(cb_t *cb)
     int fd;
     struct epoll_event new_event;
     struct sockaddr_in sockaddrin;
+    int family = (cb->type == 1) ? SOCK_STREAM : SOCK_DGRAM;
 
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->server_side_port_base);
@@ -103,7 +110,7 @@ static void init_client_socket(cb_t *cb)
     sa = (struct sockaddr *)&sockaddrin;
     len = sizeof(sockaddrin);
 
-    fd = socket(AF_INET,SOCK_STREAM,0);
+    fd = socket(AF_INET,family,0);
     if(fd <= 0) {
         printf("PANIC: cannot open socket %s %d %d\n",__FILE__,__LINE__,errno);
         exit(2);
@@ -118,12 +125,12 @@ static void init_client_socket(cb_t *cb)
     new_event.data.fd =  fd;
     epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,fd,&new_event);
     //printf("%s %d\n",__FILE__,__LINE__);
-    if(connect(fd,sa,len) < 0) {
+    if((cb->type == 1)&&(connect(fd,sa,len) < 0)) {
     }
     cb->fds[cb->client_idx++] = fd;
 }
 
-static void do_sock_read(cb_t *cb,int fd)
+static void do_tcp_sock_read(cb_t *cb,int fd)
 {
     int rc;
 
@@ -140,7 +147,27 @@ static void do_sock_read(cb_t *cb,int fd)
     }while(EDGE_TRIGGER);
 }
 
-static void do_sock_write(cb_t *cb,int fd)
+static void do_udp_sock_read(cb_t *cb,int fd)
+{
+    int rc,addr_len;
+    struct sockaddr *sa;
+    struct sockaddr_in sockaddrin;
+    sa = (struct sockaddr *)&sockaddrin;
+    addr_len = sizeof(sockaddrin);
+    do
+    {
+    	rc = recvfrom(fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
+        if(rc > 0) {
+            //printf("read %d\n",rc);
+            __sync_fetch_and_add(&total_read,rc);
+        }
+        else {
+            break;
+        }
+    }while(EDGE_TRIGGER);
+}
+
+static void do_tcp_sock_write(cb_t *cb,int fd)
 {
     int rc;
     sprintf(cb->buffer,"JURA HOY%d",g_seq++);
@@ -148,6 +175,30 @@ static void do_sock_write(cb_t *cb,int fd)
     {
         rc = write(fd,cb->buffer,cb->buf_size);
         if(rc > 0) {
+            //printf("written %d\n",rc);
+            __sync_fetch_and_add(&total_written,rc);
+        }
+        else {
+            break;
+        }
+    }while(EDGE_TRIGGER);
+}
+
+static void do_udp_sock_write(cb_t *cb,int fd)
+{
+    int rc;
+    struct sockaddr *sa;
+    struct sockaddr_in sockaddrin;
+    sprintf(cb->buffer,"JURA HOY%d",g_seq++);
+    sockaddrin.sin_family = AF_INET;
+    sockaddrin.sin_port = htons(cb->server_side_port_base);
+    sockaddrin.sin_addr.s_addr = cb->client_ip;
+    sa = (struct sockaddr *)&sockaddrin;
+    do
+    {
+    	rc = sendto(fd,cb->buffer,cb->buf_size,0,sa,sizeof(sockaddrin));
+        if(rc > 0)
+        {
             //printf("written %d\n",rc);
             __sync_fetch_and_add(&total_written,rc);
         }
@@ -166,9 +217,11 @@ static void do_sock_test_left_side(cb_t *cb)
     int events_occured,new_sock,len;
     struct sockaddr sa;
  
-    events[0].events = EPOLLIN | EPOLLOUT;
-    events[0].data.fd = cb->listener_fd;
-    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&events[0]);
+    if(cb->type == 1) {
+        events[0].events = EPOLLIN | EPOLLOUT;
+        events[0].data.fd = cb->listener_fd;
+        epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&events[0]);
+    }
 
     while(1) {       
        events_occured = epoll_wait(cb->epoll_fd,events,MAX_CLIENTS+1,-1);
@@ -187,20 +240,26 @@ static void do_sock_test_left_side(cb_t *cb)
                new_event.data.fd = cb->listener_fd;
                epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&new_event);
                if(new_sock > 0) {
-                   do_sock_write(cb,new_sock);
+                   do_tcp_sock_write(cb,new_sock);
 		           new_event.events = EPOLLIN | EPOLLOUT | EDGE_TRIGGER;
                    new_event.data.fd = new_sock;
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           else if(events[i].events & EPOLLIN) {
-               do_sock_read(cb,events[i].data.fd);
+           else if((events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
+               if(cb->type == 1)
+                   do_tcp_sock_read(cb,events[i].data.fd);
+               else
+                   do_udp_sock_read(cb,events[i].data.fd);
            }
-           else if(events[i].events & EPOLLOUT) {
-               do_sock_write(cb,events[i].data.fd);
+           else if((events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
+               if(cb->type == 1)
+                   do_tcp_sock_write(cb,events[i].data.fd);
+               else
+                   do_udp_sock_write(cb,events[i].data.fd);
            }
            else {
-               printf("%s %d\n",__FILE__,__LINE__);
+               //printf("%s %d\n",__FILE__,__LINE__);
            }
        }
        /*iterations++;
@@ -270,7 +329,8 @@ void init_test(int buf_sz,
                int srv_side_pb,
 	       	   unsigned int clnt_ip,
 		       unsigned int srv_ip,
-               int iterations)
+               int type,
+               int rxtx_flag)
 {
     int idx;
     cbs = (cb_t *)malloc(sizeof(cb_t)*number_of_threads);
@@ -292,7 +352,8 @@ void init_test(int buf_sz,
         cbs[idx].client_connections_number = clnt_conn_num;
         cbs[idx].client_ip = clnt_ip;
         cbs[idx].server_ip = srv_ip;
-        cbs[idx].full_iterations = iterations;
+        cbs[idx].type = type;
+        cbs[idx].rxtx_flag = rxtx_flag;
         cbs[idx].buffer = (char *)malloc(cbs[idx].buf_size);
         if(cbs[idx].buffer == NULL) {
             printf("memory allocation failure %s %d\n",__FILE__,__LINE__);
@@ -307,18 +368,18 @@ void init_test(int buf_sz,
 
 int main(int argc, char **argv)
 {
-    int iterations = 0;
+    int rxtx = 0x3;
     if(argc < 9)
     {
-        printf("Usage:  <buf_size> <number_of_threads> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip>\n");
+        printf("Usage:  <buf_size> <number_of_threads> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip> <type (1-tcp,2-udp> [rxtx (0x1 - write, 0x2 - read)]\n");
         exit(1);
     }
-    if(argc == 10) {
-        iterations = atoi(argv[9]);
+    if(argc == 11) {
+        rxtx = atoi(argv[10]);
     }
     printf("Entered: buf_size %d thread_number %d bytes rx/tx to print stats %d client conn num %d client port base %d server port base %d\n",
            atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]));
-    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),inet_addr(argv[7]),inet_addr(argv[8]),iterations);
+    init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),inet_addr(argv[7]),inet_addr(argv[8]),atoi(argv[9]),rxtx);
     register_start_of_test();
     while(1) {
         sleep(1);
