@@ -247,20 +247,17 @@ static void do_sock_test_left_side(cb_t *cb)
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           else if((events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
+           if((events[i].events & EPOLLIN)&&(cb->rxtx_flag & 0x1)) {
                if(cb->type == 1)
                    do_tcp_sock_read(cb,events[i].data.fd);
                else
                    do_udp_sock_read(cb,events[i].data.fd);
            }
-           else if((events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
+           if((events[i].events & EPOLLOUT)&&(cb->rxtx_flag & 0x2)) {
                if(cb->type == 1)
                    do_tcp_sock_write(cb,events[i].data.fd);
                else
                    do_udp_sock_write(cb,events[i].data.fd);
-           }
-           else {
-               //printf("%s %d\n",__FILE__,__LINE__);
            }
        }
        /*iterations++;
