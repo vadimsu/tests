@@ -109,7 +109,6 @@ static void init_client_socket(cb_t *cb)
     struct epoll_event new_event;
     struct sockaddr_in sockaddrin;
     int family = (cb->type == 1) ? SOCK_STREAM : SOCK_DGRAM;
-
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->server_side_port_base);
     sockaddrin.sin_addr.s_addr = cb->client_ip;
@@ -133,6 +132,10 @@ static void init_client_socket(cb_t *cb)
             new_event.events |= EPOLLIN;
          if(cb->rxtx_flag & TX_ON)
             new_event.events |= EPOLLOUT;
+         if(bind(fd,sa,len) < 0) {
+            printf("PANIC: cannot bind %s %d %d\n",__FILE__,__LINE__,errno);
+            exit(3);
+         }
     }
     else {
         new_event.events |= EPOLLIN;
