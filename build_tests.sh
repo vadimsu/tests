@@ -1,1 +1,1 @@
-gcc tests.c -lpthread  -o test
+gcc -Ofast tests.c -lpthread  -o test
