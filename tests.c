@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h> 
 #include <pthread.h>
+#include <signal.h>
 
 #define MAX_CLIENTS 3000
 #if 0
@@ -249,7 +250,7 @@ static void do_sock_test_left_side(cb_t *cb)
                    /*exit(5);*/
                }
                else {
-                   printf("%s %d\n",__FILE__,__LINE__);
+               //    printf("%s %d\n",__FILE__,__LINE__);
                }
                new_event.events = EPOLLIN | EPOLLOUT;
                new_event.data.fd = cb->listener_fd;
@@ -333,6 +334,14 @@ static void init_client_sockets(cb_t *cb)
 void do_test(void *arg)
 {  
    cb_t *cb = (cb_t *)arg;
+   sigset_t sigpipe_mask;
+   sigemptyset(&sigpipe_mask);
+   sigaddset(&sigpipe_mask, SIGPIPE);
+   sigset_t saved_mask;
+   if (pthread_sigmask(SIG_BLOCK, &sigpipe_mask, &saved_mask) == -1) {
+      perror("pthread_sigmask");
+      exit(1);
+   }
    init_server_sock(cb);
    init_client_sockets(cb);
    register_start_of_test(cb);
