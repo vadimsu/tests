@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <sched.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/un.h>
@@ -12,6 +14,7 @@
 #include <sys/ioctl.h> 
 #include <pthread.h>
 #include <signal.h>
+
 
 #define MAX_CLIENTS 3000
 #if 0
@@ -360,6 +363,8 @@ void init_test(int buf_sz,
                int rxtx_flag)
 {
     int idx;
+    cpu_set_t cpuset;
+
     cbs = (cb_t *)malloc(sizeof(cb_t)*number_of_threads);
     if(!cbs) {
         printf("cannot allocate cbs\n");
@@ -390,12 +395,18 @@ void init_test(int buf_sz,
         if(pthread_create(&threads[idx],NULL,do_test,(void *)&cbs[idx])) {
             printf("cannot create thread\n");
         }
+        CPU_ZERO(&cpuset);
+        CPU_SET(idx, &cpuset); 
+        if (pthread_setaffinity_np(threads[idx], sizeof(cpu_set_t), &cpuset) != 0)
+               printf("error in pthread_setaffinity_np\n");
     }
 }
 
 int main(int argc, char **argv)
 {
     int rxtx = RX_ON|TX_ON;
+    int duration = 60;
+    int i;
     if(argc < 9)
     {
         printf("Usage:  <buf_size> <number_of_threads> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip> <type (1-tcp,2-udp> [rxtx (0x1 - write, 0x2 - read)]\n");
@@ -406,13 +417,16 @@ int main(int argc, char **argv)
     }
     printf("Entered: buf_size %d thread_number %d bytes rx/tx to print stats %d client conn num %d client port base %d server port base %d connectip %s acceptip %s family %d mode %d\n",
            atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),argv[7],argv[8],atoi(argv[9]),rxtx);
+    system("cat /proc/interrupts");
     init_test(atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),inet_addr(argv[7]),inet_addr(argv[8]),atoi(argv[9]),rxtx);
     register_start_of_test();
-    while(1) {
+    while(i < duration) {
         sleep(1);
          if((total_written >= termination_criteria)||(total_read >= termination_criteria)) {
 	      print_test_results(); 
        }
+       i++;
     }
+    system("cat /proc/interrupts");
     return 0;
 }
