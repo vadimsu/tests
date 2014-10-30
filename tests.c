@@ -11,9 +11,12 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 #include <sys/ioctl.h> 
 #include <pthread.h>
 #include <signal.h>
+#include <time.h>
+
 
 
 #define MAX_CLIENTS 3000
@@ -38,7 +41,7 @@ typedef struct
     unsigned int client_ip;
     unsigned int server_ip;
     int buf_size;
-    char *buffer; 
+    unsigned char *buffer; 
     int client_connections_number;
     int writer_epoll_fd; 
     int fds[MAX_CLIENTS];
@@ -47,17 +50,26 @@ typedef struct
     int client_idx;
     int type;
     int rxtx_flag;
+    unsigned char *rr_buffer;
+    int rr_buf_size;
 }cb_t;
 
 struct timeval start_tv;
 int termination_criteria;
 uint64_t total_written = 0;
 uint64_t total_read = 0;
+uint64_t rr_average = 0;
+uint64_t rr_count = 0;
+struct timeval g_tv;
 
 #define RX_ON 0x1
 #define TX_ON 0x2
+#define LATENCY_CLIENT 0x4
+#define LATENCY_SERVER 0x8
 #define MODE_TCP 1
 #define MODE_UDP 2
+
+int g_trigger = EDGE_TRIGGER; 
 
 cb_t *cbs = NULL;
 pthread_t *threads;
@@ -93,10 +105,14 @@ static void init_server_sock(cb_t *cb)
     val = 1;
     if(ioctl(cb->listener_fd,FIONBIO,(char *)&val)) {
         printf("cannot go non-blocking mode\n");
-    }
+    } 
     if(bind(cb->listener_fd,sa,len) < 0) {
         printf("PANIC: cannot bind %s %d %d\n",__FILE__,__LINE__,errno);
         exit(3);
+    }
+    if(cb->rxtx_flag & LATENCY_SERVER) {
+         val = 1;
+         setsockopt(cb->listener_fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
     }
     if(listen(cb->listener_fd,10000) < 0) {
         printf("PANIC: cannot listen %s %d %d\n",__FILE__,__LINE__,errno);
@@ -143,7 +159,7 @@ static void init_client_socket(cb_t *cb)
     }
     else {
         new_event.events |= EPOLLIN;
-        if(cb->rxtx_flag & TX_ON)
+        if(cb->rxtx_flag & (TX_ON|LATENCY_CLIENT))
             new_event.events |= EPOLLOUT;
     }
     new_event.data.fd =  fd;
@@ -151,23 +167,100 @@ static void init_client_socket(cb_t *cb)
     if((cb->type == MODE_TCP)&&(connect(fd,sa,len) < 0)) {
     }
     cb->fds[cb->client_idx++] = fd;
+    if(cb->rxtx_flag & LATENCY_CLIENT) {
+         val = 1;
+         setsockopt(fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
+    }
 }
 
 static void do_tcp_sock_read(cb_t *cb,int fd)
 {
     int rc;
+    unsigned int secs;
+    unsigned int usecs;
+    struct timeval tv,tv1;
+    unsigned int val1,val2;
+    struct epoll_event new_event;
 
-    do
-    {
+    do {
         rc = read(fd,cb->buffer,cb->buf_size);
         if(rc > 0) {
-            //printf("read %d\n",rc);
             __sync_fetch_and_add(&total_read,rc);
+            if(cb->rxtx_flag & LATENCY_SERVER) { 
+                if((cb->buffer[0] == 0x7F)&&
+                   (cb->buffer[1] == 0xF7)&&
+                   (cb->buffer[2] == 0xA5)&&
+                   (cb->buffer[3] == 0x5A)&&
+                   (cb->buffer[4+sizeof(struct timeval)] == 0x7F)&&
+                   (cb->buffer[5+sizeof(struct timeval)] == 0xF7)&&
+                   (cb->buffer[6+sizeof(struct timeval)] == 0xA5)&&
+                   (cb->buffer[7+sizeof(struct timeval)] == 0x5A)) {
+                    new_event.events = g_trigger;
+                    new_event.events |= EPOLLOUT;
+                    new_event.data.fd = fd;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    if(cb->rr_buffer) {
+                        if(rc <= cb->rr_buf_size) {
+                            memcpy(cb->rr_buffer,cb->buffer,rc);
+                            cb->rr_buf_size = rc;
+                        }
+                        else {
+                            free(cb->rr_buffer);
+                            cb->rr_buffer = NULL;
+                            cb->rr_buf_size = 0;
+                        }
+                    }
+                    if(!cb->rr_buffer) {
+                        cb->rr_buffer = malloc(rc);
+                        cb->rr_buf_size = rc;
+                        memcpy(cb->rr_buffer,cb->buffer,rc);
+                    } 
+                }
+                else {
+                    new_event.events = g_trigger;
+                    new_event.events |= EPOLLIN;
+                    new_event.data.fd = fd;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                }
+            }
+            else if(cb->rxtx_flag & LATENCY_CLIENT) { 
+                if((cb->buffer[0] == 0x7F)&&
+                   (cb->buffer[1] == 0xF7)&&
+                   (cb->buffer[2] == 0xA5)&&
+                   (cb->buffer[3] == 0x5A)&&
+                   (cb->buffer[4+sizeof(tv1)] == 0x7F)&&
+                   (cb->buffer[5+sizeof(tv1)] == 0xF7)&&
+                   (cb->buffer[6+sizeof(tv1)] == 0xA5)&&
+                   (cb->buffer[7+sizeof(tv1)] == 0x5A)) {
+                    new_event.events = g_trigger;
+                    new_event.events |= EPOLLOUT;
+                    new_event.data.fd = fd;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    bcopy(&cb->buffer[4],&tv1,sizeof(tv1));
+                    gettimeofday(&tv,NULL);
+                    val1 = tv1.tv_sec*1000000 + tv1.tv_usec;
+                    val2 = tv.tv_sec*1000000 + tv.tv_usec;
+                    if(val1 > val2){
+                        printf("val1>val2!!! %u %u\n",val1,val2);
+                    }
+                    else {
+                        rr_average += val2 - val1;
+                        rr_count++;
+                        //printf("rtt %u sec %u %u usec %u %u\n",val2-val1,tv1.tv_sec,tv.tv_sec,tv1.tv_usec,tv.tv_usec);
+                    }
+                }
+                else {
+                    new_event.events = g_trigger;
+                    new_event.events |= EPOLLOUT|EPOLLIN;
+                    new_event.data.fd = fd;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                }
+            }
         }
         else {
             break;
         }
-    }while(EDGE_TRIGGER);
+    }while(g_trigger);
 }
 
 static void do_udp_sock_read(cb_t *cb,int fd)
@@ -177,8 +270,7 @@ static void do_udp_sock_read(cb_t *cb,int fd)
     struct sockaddr_in sockaddrin;
     sa = (struct sockaddr *)&sockaddrin;
     addr_len = sizeof(sockaddrin);
-    do
-    {
+    do {
     	rc = recvfrom(fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
         if(rc > 0) {
             __sync_fetch_and_add(&total_read,rc);
@@ -186,23 +278,66 @@ static void do_udp_sock_read(cb_t *cb,int fd)
         else {
             break;
         }
-    }while(EDGE_TRIGGER);
+    }while(g_trigger);
 }
 
 static void do_tcp_sock_write(cb_t *cb,int fd)
 {
-    int rc;
-    sprintf(cb->buffer,"JURA HOY%d",g_seq++);
-    do
-    {
-        rc = write(fd,cb->buffer,cb->buf_size);
+    int rc,size;
+    struct timeval tv;
+    struct epoll_event new_event;
+
+    if(cb->rxtx_flag & LATENCY_CLIENT) {
+        cb->buffer[0] = 0x7F;
+        cb->buffer[1] = 0xF7;
+        cb->buffer[2] = 0xA5;
+        cb->buffer[3] = 0x5A;
+        gettimeofday(&tv,NULL);
+        bcopy(&tv,&cb->buffer[4],sizeof(tv)); 
+        cb->buffer[4+sizeof(tv)] = 0x7F;
+        cb->buffer[5+sizeof(tv)] = 0xF7;
+        cb->buffer[6+sizeof(tv)] = 0xA5;
+        cb->buffer[7+sizeof(tv)] = 0x5A; 
+        size = 8+sizeof(tv);
+        new_event.events = g_trigger;
+        new_event.events |= EPOLLIN;
+        new_event.data.fd = fd;
+        epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+    }
+    else if(cb->rxtx_flag & LATENCY_SERVER) {
+        if(cb->rr_buffer) {
+            memcpy(cb->buffer,cb->rr_buffer,cb->rr_buf_size);
+            size = cb->rr_buf_size;
+            free(cb->rr_buffer);
+            cb->rr_buffer = NULL;
+            cb->rr_buf_size = 0;
+            new_event.events = g_trigger;
+            new_event.events |= EPOLLIN;
+            new_event.data.fd = fd;
+            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+        }
+        else {
+            memset(cb->buffer,0,cb->buf_size);
+            size = cb->buf_size;
+            new_event.events = g_trigger;
+            new_event.events |= EPOLLIN;
+            new_event.data.fd = fd;
+            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+        }
+    }
+    else {
+        sprintf(cb->buffer,"JURA HOY%d",g_seq++);
+        size = cb->buf_size;
+    }
+    do {
+        rc = write(fd,cb->buffer,size);
         if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
         }
         else {
             break;
         }
-    }while(EDGE_TRIGGER);
+    }while(g_trigger);
 }
 
 static void do_udp_sock_write(cb_t *cb,int fd)
@@ -224,7 +359,7 @@ static void do_udp_sock_write(cb_t *cb,int fd)
         else {
             break;
         }
-    }while(EDGE_TRIGGER);
+    }while(g_trigger);
 }
 
 static void do_sock_test_left_side(cb_t *cb)
@@ -253,31 +388,40 @@ static void do_sock_test_left_side(cb_t *cb)
                    /*exit(5);*/
                }
                else {
-               //    printf("%s %d\n",__FILE__,__LINE__);
+                   //printf("%s %d\n",__FILE__,__LINE__);
                }
                new_event.events = EPOLLIN | EPOLLOUT;
                new_event.data.fd = cb->listener_fd;
                epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&new_event);
                if(new_sock > 0) {
-                   new_event.events = EDGE_TRIGGER;
-                   if(cb->rxtx_flag & TX_ON) {
-                       do_tcp_sock_write(cb,new_sock);
-                       new_event.events |= EPOLLOUT;
+                   new_event.events = g_trigger;
+                   if(cb->rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
+                       if(cb->rxtx_flag & LATENCY_CLIENT) {
+                           do_tcp_sock_write(cb,new_sock);
+                           new_event.events |= EPOLLOUT;
+                       }
+                       new_event.events |= EPOLLIN;
                    }
-                   if(cb->rxtx_flag & RX_ON) {
-  	               new_event.events |= EPOLLIN;
+                   else {
+                       if(cb->rxtx_flag & TX_ON) {
+                           do_tcp_sock_write(cb,new_sock);
+                           new_event.events |= EPOLLOUT;
+                       }
+                       if(cb->rxtx_flag & RX_ON) {
+  	                   new_event.events |= EPOLLIN;
+                       } 
                    }
                    new_event.data.fd = new_sock;
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & RX_ON)) {
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & (RX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
                if(cb->type == MODE_TCP)
                    do_tcp_sock_read(cb,events[i].data.fd);
                else
                    do_udp_sock_read(cb,events[i].data.fd);
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & TX_ON)) {
+           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & (TX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
                if(cb->type == MODE_TCP)
                    do_tcp_sock_write(cb,events[i].data.fd);
                else
@@ -364,6 +508,14 @@ void init_test(int buf_sz,
 {
     int idx;
     cpu_set_t cpuset;
+   
+    if(rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
+        if(number_of_threads > 1) {
+            printf("If latency is measured, only one thread must be configured\n");
+            exit(0);
+        }
+        gettimeofday(&g_tv,NULL);
+    }
 
     cbs = (cb_t *)malloc(sizeof(cb_t)*number_of_threads);
     if(!cbs) {
@@ -405,15 +557,19 @@ void init_test(int buf_sz,
 int main(int argc, char **argv)
 {
     int rxtx = RX_ON|TX_ON;
-    int duration = 60;
+    int duration = 1500;
     int i;
-    if(argc < 9)
-    {
+
+    if(argc < 9) {
         printf("Usage:  <buf_size> <number_of_threads> <bytes rx/tx to print stats> <client conn num> <client port base> <server port base> <connectip> <acceptip> <type (1-tcp,2-udp> [rxtx (0x1 - write, 0x2 - read)]\n");
         exit(1);
     }
     if(argc == 11) {
         rxtx = atoi(argv[10]);
+    }
+    if(rxtx & (LATENCY_CLIENT|LATENCY_SERVER)) {
+        g_trigger = 0;
+        duration = 200;
     }
     printf("Entered: buf_size %d thread_number %d bytes rx/tx to print stats %d client conn num %d client port base %d server port base %d connectip %s acceptip %s family %d mode %d\n",
            atoi(argv[1]),atoi(argv[2]),atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),argv[7],argv[8],atoi(argv[9]),rxtx);
@@ -427,6 +583,13 @@ int main(int argc, char **argv)
        }
        i++;
     }
-    system("cat /proc/interrupts");
+    if(rxtx & LATENCY_CLIENT) {
+        if(rr_count == 0)
+            printf("0 responses received\n");
+        else
+            printf("latency(avg) %f micro\n",(float)rr_average / (float)rr_count);
+    }
+    else
+        system("cat /proc/interrupts");
     return 0;
 }
