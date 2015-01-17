@@ -326,7 +326,8 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
         }
     }
     else {
-        sprintf(cb->buffer,"JURA HOY%d",g_seq++);
+    //    sprintf(cb->buffer,"JURA HOY%d",g_seq++);
+        memset(cb->buffer,'H',cb->buf_size);
         size = cb->buf_size;
     }
     do {
@@ -557,7 +558,7 @@ void init_test(int buf_sz,
 int main(int argc, char **argv)
 {
     int rxtx = RX_ON|TX_ON;
-    int duration = 1500;
+    int duration = 1500000;
     int i;
 
     if(argc < 9) {
