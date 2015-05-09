@@ -35,12 +35,14 @@ static void register_start_of_test();
 
 int g_seq = 0;
 
-typedef struct
+struct socket_entry
 {
 	int fd;
-	TAILQ_ENTRY(read_q_entry) read_q_entry;
-	TAILQ_ENTRY(write_q_entry) write_q_entry;
-}socket_entry_t;
+	int is_in_read_q;
+	int is_in_write_q;
+	TAILQ_ENTRY(socket_entry) read_q_entry;
+	TAILQ_ENTRY(socket_entry) write_q_entry;
+};
 
 typedef struct
 {
@@ -54,19 +56,17 @@ typedef struct
     int writer_epoll_fd; 
     int fds[MAX_CLIENTS];
     int epoll_fd;
-    socket_entry_t listener_socket_entry;
+    struct socket_entry listener_socket_entry;
     int client_idx;
     int type;
     int rxtx_flag;
     unsigned char *rr_buffer;
     int rr_buf_size;
+    int read_q_entries_count;
+    int write_q_entries_count;
+    TAILQ_HEAD(, read_q) read_q;
+    TAILQ_HEAD(, write_q) write_q;
 }cb_t;
-
-TAILQ_HEAD(read_q, read_q);
-TAILQ_HEAD(write_q, write_q);
-
-struct read_q g_read_q;
-struct write_q g_write_q;
 
 struct timeval start_tv;
 int termination_criteria;
@@ -90,6 +90,34 @@ pthread_t *threads;
 
 static void clean_up(int fd);
 
+static void remove_from_read_queue(cb_t *cb, struct socket_entry *p_socket_entry)
+{
+	p_socket_entry->is_in_read_q = 0;
+	cb->read_q_entries_count--;
+	TAILQ_REMOVE(&cb->read_q, p_socket_entry, read_q_entry);
+}
+
+static void remove_from_write_queue(cb_t *cb, struct socket_entry *p_socket_entry)
+{
+	p_socket_entry->is_in_write_q = 0;
+	cb->write_q_entries_count--;
+	TAILQ_REMOVE(&cb->write_q, p_socket_entry, write_q_entry);
+}
+
+static void insert_into_read_queue(cb_t *cb, struct socket_entry *p_socket_entry)
+{
+	p_socket_entry->is_in_read_q = 1;
+	cb->read_q_entries_count++;
+	TAILQ_INSERT_TAIL(&cb->read_q, p_socket_entry, read_q_entry);
+}
+
+static void insert_into_write_queue(cb_t *cb, struct socket_entry *p_socket_entry)
+{
+	p_socket_entry->is_in_write_q = 1;
+	cb->write_q_entries_count++;
+	TAILQ_INSERT_TAIL(&cb->write_q, p_socket_entry, write_q_entry);
+}
+
 static void init_server_sock(cb_t *cb)
 {
     struct sockaddr *sa;
@@ -97,7 +125,7 @@ static void init_server_sock(cb_t *cb)
     int val; 
     struct sockaddr_in sockaddrin;
 
-    memset(&cb->listener_socket_entry,0,sizeof(socket_entry_t));
+    memset(&cb->listener_socket_entry,0,sizeof(struct socket_entry));
 
     cb->epoll_fd = epoll_create(10000);
 
@@ -144,7 +172,7 @@ static void init_client_socket(cb_t *cb)
     struct epoll_event new_event;
     struct sockaddr_in sockaddrin;
     int family = (cb->type == 1) ? SOCK_STREAM : SOCK_DGRAM;
-    socket_entry_t *p_socket_entry = malloc(sizeof(socket_entry_t));
+    struct socket_entry *p_socket_entry = malloc(sizeof(struct socket_entry));
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->server_side_port_base);
     sockaddrin.sin_addr.s_addr = cb->client_ip;
@@ -154,7 +182,7 @@ static void init_client_socket(cb_t *cb)
 	printf("cannot allocate socket entry %s %d\n",__FILE__,__LINE__);
 	exit(0);
     }
-    memset(p_socket_entry,0,sizeof(socket_entry_t));
+    memset(p_socket_entry,0,sizeof(struct socket_entry));
 
     p_socket_entry->fd = socket(AF_INET,family,0);
     if(p_socket_entry->fd <= 0) {
@@ -194,7 +222,7 @@ static void init_client_socket(cb_t *cb)
     }
 }
 
-static void do_tcp_sock_read(cb_t *cb, socket_entry_t* p_socket_entry)
+static void do_tcp_sock_read(cb_t *cb, struct socket_entry* p_socket_entry)
 {
     int rc;
     unsigned int secs;
@@ -202,10 +230,12 @@ static void do_tcp_sock_read(cb_t *cb, socket_entry_t* p_socket_entry)
     struct timeval tv,tv1;
     unsigned int val1,val2;
     struct epoll_event new_event;
+    int read_this_time = 0;
 
     do {
         rc = read(p_socket_entry->fd,cb->buffer,cb->buf_size);
         if(rc > 0) {
+	    read_this_time += rc;
             __sync_fetch_and_add(&total_read,rc);
             if(cb->rxtx_flag & LATENCY_SERVER) { 
                 if((cb->buffer[0] == 0x7F)&&
@@ -277,14 +307,23 @@ static void do_tcp_sock_read(cb_t *cb, socket_entry_t* p_socket_entry)
                     epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                 }
             }
+	    else if(read_this_time > (cb->buf_size << 10)) {
+		if (!p_socket_entry->is_in_read_q) {
+			insert_into_read_queue(cb, p_socket_entry);
+		}
+		break;
+	    }
         }
         else {
+	    if (p_socket_entry->is_in_read_q) {
+		remove_from_read_queue(cb,p_socket_entry);
+	    }
             break;
         }
     }while(g_trigger);
 }
 
-static void do_udp_sock_read(cb_t *cb,socket_entry_t* p_socket_entry)
+static void do_udp_sock_read(cb_t *cb,struct socket_entry* p_socket_entry)
 {
     int rc,addr_len;
     struct sockaddr *sa;
@@ -302,9 +341,9 @@ static void do_udp_sock_read(cb_t *cb,socket_entry_t* p_socket_entry)
     }while(g_trigger);
 }
 
-static void do_tcp_sock_write(cb_t *cb, socket_entry_t* p_socket_entry)
+static void do_tcp_sock_write(cb_t *cb, struct socket_entry* p_socket_entry)
 {
-    int rc,size;
+    int rc,size,written_this_time = 0;
     struct timeval tv;
     struct epoll_event new_event;
 
@@ -355,16 +394,26 @@ static void do_tcp_sock_write(cb_t *cb, socket_entry_t* p_socket_entry)
         rc = write(p_socket_entry->fd,cb->buffer,size);
         if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
+	   written_this_time += rc;
+	    if(written_this_time > (cb->buf_size << 10)) {
+		if (!p_socket_entry->is_in_write_q) {
+			insert_into_write_queue(cb, p_socket_entry);
+		}
+		break;
+	    }
         }
         else {
+	    if (p_socket_entry->is_in_write_q) {
+		remove_from_write_queue(cb,p_socket_entry);
+	    }
             break;
         }
     }while(g_trigger);
 }
 
-static void do_udp_sock_write(cb_t *cb,socket_entry_t* p_socket_entry)
+static void do_udp_sock_write(cb_t *cb,struct socket_entry* p_socket_entry)
 {
-    int rc;
+    int rc,written_this_time = 0;
     struct sockaddr *sa;
     struct sockaddr_in sockaddrin;
     sprintf(cb->buffer,"JURA HOY%d",g_seq++);
@@ -376,6 +425,7 @@ static void do_udp_sock_write(cb_t *cb,socket_entry_t* p_socket_entry)
     {
     	rc = sendto(p_socket_entry->fd,cb->buffer,cb->buf_size,0,sa,sizeof(sockaddrin));
         if(rc > 0) {
+	    written_this_time += rc;
             __sync_fetch_and_add(&total_written,rc);
         }
         else {
@@ -390,9 +440,9 @@ static void do_sock_test_left_side(cb_t *cb)
 
     struct epoll_event events[MAX_CLIENTS+1];   
     struct epoll_event new_event;
-    int events_occured,new_sock,len;
+    int events_occured,new_sock,len,entries_to_process;
     struct sockaddr sa;
-    socket_entry_t *p_socket_entry;
+    struct socket_entry *p_socket_entry;
  
     if(cb->type == MODE_TCP) {
         events[0].events = EPOLLIN;
@@ -400,8 +450,26 @@ static void do_sock_test_left_side(cb_t *cb)
         epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_socket_entry.fd,&events[0]);
     }
 
-    while(1) {       
-       events_occured = epoll_wait(cb->epoll_fd,events,MAX_CLIENTS+1,-1);
+    while(1) {  
+       p_socket_entry = TAILQ_FIRST(&cb->read_q);
+       entries_to_process = cb->read_q_entries_count;
+       while (p_socket_entry && (entries_to_process > 0)) {
+		struct socket_entry *p_next = TAILQ_NEXT(p_socket_entry, read_q_entry);
+		remove_from_read_queue(cb,p_socket_entry);
+		do_tcp_sock_read(cb, p_socket_entry);
+		p_socket_entry = p_next;
+		entries_to_process--;
+       }
+       p_socket_entry = TAILQ_FIRST(&cb->write_q);
+       entries_to_process = cb->write_q_entries_count;
+       while (p_socket_entry && (entries_to_process > 0)) {
+		struct socket_entry *p_next = TAILQ_NEXT(p_socket_entry, write_q_entry);
+		remove_from_write_queue(cb,p_socket_entry);
+		do_tcp_sock_write(cb, p_socket_entry);
+		p_socket_entry = p_next;
+		entries_to_process--;
+       }
+       events_occured = epoll_wait(cb->epoll_fd,events,MAX_CLIENTS+1, (cb->read_q_entries_count || cb->write_q_entries_count) ? 0 : -1);
        for(i = 0;i < events_occured;i++) {
            if(events[i].data.ptr == &cb->listener_socket_entry) {
                len = sizeof(sa);
@@ -411,12 +479,12 @@ static void do_sock_test_left_side(cb_t *cb)
                    /*exit(5);*/
                }
                else {
-                   p_socket_entry = malloc(sizeof(socket_entry_t));
+                   p_socket_entry = malloc(sizeof(struct socket_entry));
 		   if(!p_socket_entry) {
 			printf("cannot allocate memory %s %d\n",__FILE__,__LINE__);
 			exit(0);
 		   }
-		   memset(p_socket_entry,0,sizeof(socket_entry_t));
+		   memset(p_socket_entry,0,sizeof(struct socket_entry));
 		   p_socket_entry->fd = new_sock;
                }
                new_event.events = EPOLLIN | EPOLLOUT;
@@ -426,14 +494,14 @@ static void do_sock_test_left_side(cb_t *cb)
                    new_event.events = g_trigger;
                    if(cb->rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
                        if(cb->rxtx_flag & LATENCY_CLIENT) {
-                           do_tcp_sock_write(cb,new_sock);
+                           do_tcp_sock_write(cb,events[i].data.ptr);
                            new_event.events |= EPOLLOUT;
                        }
                        new_event.events |= EPOLLIN;
                    }
                    else {
                        if(cb->rxtx_flag & TX_ON) {
-                           do_tcp_sock_write(cb,new_sock);
+                           do_tcp_sock_write(cb,events[i].data.ptr);
                            new_event.events |= EPOLLOUT;
                        }
                        if(cb->rxtx_flag & RX_ON) {
@@ -538,9 +606,6 @@ void init_test(int buf_sz,
     int idx;
     cpu_set_t cpuset;
 
-    TAILQ_INIT(&g_read_q);
-    TAILQ_INIT(&g_write_q);
-   
     if(rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
         if(number_of_threads > 1) {
             printf("If latency is measured, only one thread must be configured\n");
@@ -575,6 +640,10 @@ void init_test(int buf_sz,
             printf("memory allocation failure %s %d\n",__FILE__,__LINE__);
             exit(0);
         }
+	cbs[idx].write_q_entries_count = 0;
+	cbs[idx].read_q_entries_count = 0;
+	TAILQ_INIT(&cbs[idx].read_q);
+    	TAILQ_INIT(&cbs[idx].write_q);
         memset(cbs[idx].buffer,0xEE,cbs[idx].buf_size);
         if(pthread_create(&threads[idx],NULL,do_test,(void *)&cbs[idx])) {
             printf("cannot create thread\n");
