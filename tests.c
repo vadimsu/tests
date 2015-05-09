@@ -15,6 +15,7 @@
 #include <sys/ioctl.h> 
 #include <pthread.h>
 #include <signal.h>
+#include <sys/queue.h>
 #include <time.h>
 
 
@@ -36,6 +37,13 @@ int g_seq = 0;
 
 typedef struct
 {
+	int fd;
+	TAILQ_ENTRY(read_q_entry) read_q_entry;
+	TAILQ_ENTRY(write_q_entry) write_q_entry;
+}socket_entry_t;
+
+typedef struct
+{
     int client_side_port_base;
     int server_side_port_base;
     unsigned int client_ip;
@@ -46,13 +54,19 @@ typedef struct
     int writer_epoll_fd; 
     int fds[MAX_CLIENTS];
     int epoll_fd;
-    int listener_fd;
+    socket_entry_t listener_socket_entry;
     int client_idx;
     int type;
     int rxtx_flag;
     unsigned char *rr_buffer;
     int rr_buf_size;
 }cb_t;
+
+TAILQ_HEAD(read_q, read_q);
+TAILQ_HEAD(write_q, write_q);
+
+struct read_q g_read_q;
+struct write_q g_write_q;
 
 struct timeval start_tv;
 int termination_criteria;
@@ -83,6 +97,8 @@ static void init_server_sock(cb_t *cb)
     int val; 
     struct sockaddr_in sockaddrin;
 
+    memset(&cb->listener_socket_entry,0,sizeof(socket_entry_t));
+
     cb->epoll_fd = epoll_create(10000);
 
     if(cb->type != MODE_TCP) {
@@ -95,26 +111,26 @@ static void init_server_sock(cb_t *cb)
     sa = (struct sockaddr *)&sockaddrin;
     len = sizeof(sockaddrin);
     
-    cb->listener_fd = socket(AF_INET,SOCK_STREAM,0);
-    if(cb->listener_fd <= 0) {
+    cb->listener_socket_entry.fd = socket(AF_INET,SOCK_STREAM,0);
+    if(cb->listener_socket_entry.fd <= 0) {
         printf("PANIC: cannot open socket %s %d %d\n",__FILE__,__LINE__,errno);
         exit(2);
     }
     val = 1;
-    setsockopt(cb->listener_fd,SOL_SOCKET, SO_REUSEADDR, &val,sizeof(val));
+    setsockopt(cb->listener_socket_entry.fd,SOL_SOCKET, SO_REUSEADDR, &val,sizeof(val));
     val = 1;
-    if(ioctl(cb->listener_fd,FIONBIO,(char *)&val)) {
+    if(ioctl(cb->listener_socket_entry.fd,FIONBIO,(char *)&val)) {
         printf("cannot go non-blocking mode\n");
     } 
-    if(bind(cb->listener_fd,sa,len) < 0) {
+    if(bind(cb->listener_socket_entry.fd,sa,len) < 0) {
         printf("PANIC: cannot bind %s %d %d\n",__FILE__,__LINE__,errno);
         exit(3);
     }
     if(cb->rxtx_flag & LATENCY_SERVER) {
          val = 1;
-         setsockopt(cb->listener_fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
+         setsockopt(cb->listener_socket_entry.fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
     }
-    if(listen(cb->listener_fd,10000) < 0) {
+    if(listen(cb->listener_socket_entry.fd,10000) < 0) {
         printf("PANIC: cannot listen %s %d %d\n",__FILE__,__LINE__,errno);
     }
     printf("listener created %d\n",ntohs(sockaddrin.sin_port));
@@ -125,25 +141,30 @@ static void init_client_socket(cb_t *cb)
     struct sockaddr *sa;
     int len;
     int val;
-    int fd;
     struct epoll_event new_event;
     struct sockaddr_in sockaddrin;
     int family = (cb->type == 1) ? SOCK_STREAM : SOCK_DGRAM;
+    socket_entry_t *p_socket_entry = malloc(sizeof(socket_entry_t));
     sockaddrin.sin_family = AF_INET;
     sockaddrin.sin_port = htons(cb->server_side_port_base);
     sockaddrin.sin_addr.s_addr = cb->client_ip;
     sa = (struct sockaddr *)&sockaddrin;
     len = sizeof(sockaddrin);
+    if (!p_socket_entry) {
+	printf("cannot allocate socket entry %s %d\n",__FILE__,__LINE__);
+	exit(0);
+    }
+    memset(p_socket_entry,0,sizeof(socket_entry_t));
 
-    fd = socket(AF_INET,family,0);
-    if(fd <= 0) {
+    p_socket_entry->fd = socket(AF_INET,family,0);
+    if(p_socket_entry->fd <= 0) {
         printf("PANIC: cannot open socket %s %d %d\n",__FILE__,__LINE__,errno);
         exit(2);
     }
     val = 1;
-    setsockopt(fd,SOL_SOCKET, SO_REUSEADDR, &val,sizeof(val));
+    setsockopt(p_socket_entry->fd,SOL_SOCKET, SO_REUSEADDR, &val,sizeof(val));
     val = 1;
-    if(ioctl(fd,FIONBIO,(char *)&val)) {
+    if(ioctl(p_socket_entry->fd,FIONBIO,(char *)&val)) {
         printf("cannot go non-blocking mode\n");
     }
     new_event.events = 0;
@@ -152,7 +173,7 @@ static void init_client_socket(cb_t *cb)
             new_event.events |= EPOLLIN;
          if(cb->rxtx_flag & TX_ON)
             new_event.events |= EPOLLOUT;
-         if(bind(fd,sa,len) < 0) {
+         if(bind(p_socket_entry->fd,sa,len) < 0) {
             printf("PANIC: cannot bind %s %d %d\n",__FILE__,__LINE__,errno);
             exit(3);
          }
@@ -162,18 +183,18 @@ static void init_client_socket(cb_t *cb)
         if(cb->rxtx_flag & (TX_ON|LATENCY_CLIENT))
             new_event.events |= EPOLLOUT;
     }
-    new_event.data.fd =  fd;
-    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,fd,&new_event);
-    if((cb->type == MODE_TCP)&&(connect(fd,sa,len) < 0)) {
+    new_event.data.ptr =  p_socket_entry;
+    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,p_socket_entry->fd,&new_event);
+    if((cb->type == MODE_TCP)&&(connect(p_socket_entry->fd,sa,len) < 0)) {
     }
-    cb->fds[cb->client_idx++] = fd;
+    cb->fds[cb->client_idx++] = p_socket_entry->fd;
     if(cb->rxtx_flag & LATENCY_CLIENT) {
          val = 1;
-         setsockopt(fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
+         setsockopt(p_socket_entry->fd,IPPROTO_TCP, TCP_NODELAY, &val,sizeof(val));
     }
 }
 
-static void do_tcp_sock_read(cb_t *cb,int fd)
+static void do_tcp_sock_read(cb_t *cb, socket_entry_t* p_socket_entry)
 {
     int rc;
     unsigned int secs;
@@ -183,7 +204,7 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
     struct epoll_event new_event;
 
     do {
-        rc = read(fd,cb->buffer,cb->buf_size);
+        rc = read(p_socket_entry->fd,cb->buffer,cb->buf_size);
         if(rc > 0) {
             __sync_fetch_and_add(&total_read,rc);
             if(cb->rxtx_flag & LATENCY_SERVER) { 
@@ -197,8 +218,8 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
                    (cb->buffer[7+sizeof(struct timeval)] == 0x5A)) {
                     new_event.events = g_trigger;
                     new_event.events |= EPOLLOUT;
-                    new_event.data.fd = fd;
-                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    new_event.data.ptr = p_socket_entry;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                     if(cb->rr_buffer) {
                         if(rc <= cb->rr_buf_size) {
                             memcpy(cb->rr_buffer,cb->buffer,rc);
@@ -219,8 +240,8 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
                 else {
                     new_event.events = g_trigger;
                     new_event.events |= EPOLLIN;
-                    new_event.data.fd = fd;
-                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    new_event.data.ptr = p_socket_entry;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                 }
             }
             else if(cb->rxtx_flag & LATENCY_CLIENT) { 
@@ -234,8 +255,8 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
                    (cb->buffer[7+sizeof(tv1)] == 0x5A)) {
                     new_event.events = g_trigger;
                     new_event.events |= EPOLLOUT;
-                    new_event.data.fd = fd;
-                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    new_event.data.ptr = p_socket_entry;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                     bcopy(&cb->buffer[4],&tv1,sizeof(tv1));
                     gettimeofday(&tv,NULL);
                     val1 = tv1.tv_sec*1000000 + tv1.tv_usec;
@@ -252,8 +273,8 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
                 else {
                     new_event.events = g_trigger;
                     new_event.events |= EPOLLOUT|EPOLLIN;
-                    new_event.data.fd = fd;
-                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+                    new_event.data.ptr = p_socket_entry;
+                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                 }
             }
         }
@@ -263,7 +284,7 @@ static void do_tcp_sock_read(cb_t *cb,int fd)
     }while(g_trigger);
 }
 
-static void do_udp_sock_read(cb_t *cb,int fd)
+static void do_udp_sock_read(cb_t *cb,socket_entry_t* p_socket_entry)
 {
     int rc,addr_len;
     struct sockaddr *sa;
@@ -271,7 +292,7 @@ static void do_udp_sock_read(cb_t *cb,int fd)
     sa = (struct sockaddr *)&sockaddrin;
     addr_len = sizeof(sockaddrin);
     do {
-    	rc = recvfrom(fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
+    	rc = recvfrom(p_socket_entry->fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
         if(rc > 0) {
             __sync_fetch_and_add(&total_read,rc);
         }
@@ -281,7 +302,7 @@ static void do_udp_sock_read(cb_t *cb,int fd)
     }while(g_trigger);
 }
 
-static void do_tcp_sock_write(cb_t *cb,int fd)
+static void do_tcp_sock_write(cb_t *cb, socket_entry_t* p_socket_entry)
 {
     int rc,size;
     struct timeval tv;
@@ -301,8 +322,8 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
         size = 8+sizeof(tv);
         new_event.events = g_trigger;
         new_event.events |= EPOLLIN;
-        new_event.data.fd = fd;
-        epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+        new_event.data.ptr = p_socket_entry;
+        epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
     }
     else if(cb->rxtx_flag & LATENCY_SERVER) {
         if(cb->rr_buffer) {
@@ -313,16 +334,16 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
             cb->rr_buf_size = 0;
             new_event.events = g_trigger;
             new_event.events |= EPOLLIN;
-            new_event.data.fd = fd;
-            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+            new_event.data.ptr = p_socket_entry;
+            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
         }
         else {
             memset(cb->buffer,0,cb->buf_size);
             size = cb->buf_size;
             new_event.events = g_trigger;
             new_event.events |= EPOLLIN;
-            new_event.data.fd = fd;
-            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,fd,&new_event);
+            new_event.data.ptr = p_socket_entry;
+            epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
         }
     }
     else {
@@ -331,7 +352,7 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
         size = cb->buf_size;
     }
     do {
-        rc = write(fd,cb->buffer,size);
+        rc = write(p_socket_entry->fd,cb->buffer,size);
         if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
         }
@@ -341,7 +362,7 @@ static void do_tcp_sock_write(cb_t *cb,int fd)
     }while(g_trigger);
 }
 
-static void do_udp_sock_write(cb_t *cb,int fd)
+static void do_udp_sock_write(cb_t *cb,socket_entry_t* p_socket_entry)
 {
     int rc;
     struct sockaddr *sa;
@@ -353,7 +374,7 @@ static void do_udp_sock_write(cb_t *cb,int fd)
     sa = (struct sockaddr *)&sockaddrin;
     do
     {
-    	rc = sendto(fd,cb->buffer,cb->buf_size,0,sa,sizeof(sockaddrin));
+    	rc = sendto(p_socket_entry->fd,cb->buffer,cb->buf_size,0,sa,sizeof(sockaddrin));
         if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
         }
@@ -371,29 +392,36 @@ static void do_sock_test_left_side(cb_t *cb)
     struct epoll_event new_event;
     int events_occured,new_sock,len;
     struct sockaddr sa;
+    socket_entry_t *p_socket_entry;
  
     if(cb->type == MODE_TCP) {
         events[0].events = EPOLLIN;
-        events[0].data.fd = cb->listener_fd;
-        epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&events[0]);
+        events[0].data.ptr = &cb->listener_socket_entry;
+        epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_socket_entry.fd,&events[0]);
     }
 
     while(1) {       
        events_occured = epoll_wait(cb->epoll_fd,events,MAX_CLIENTS+1,-1);
        for(i = 0;i < events_occured;i++) {
-           if(events[i].data.fd == cb->listener_fd) {
+           if(events[i].data.ptr == &cb->listener_socket_entry) {
                len = sizeof(sa);
-               new_sock = accept(cb->listener_fd,&sa,&len);
+               new_sock = accept(cb->listener_socket_entry.fd,&sa,&len);
                if(new_sock <= 0) {
                    printf("a problem in accept %d\n",errno);
                    /*exit(5);*/
                }
                else {
-                   //printf("%s %d\n",__FILE__,__LINE__);
+                   p_socket_entry = malloc(sizeof(socket_entry_t));
+		   if(!p_socket_entry) {
+			printf("cannot allocate memory %s %d\n",__FILE__,__LINE__);
+			exit(0);
+		   }
+		   memset(p_socket_entry,0,sizeof(socket_entry_t));
+		   p_socket_entry->fd = new_sock;
                }
                new_event.events = EPOLLIN | EPOLLOUT;
-               new_event.data.fd = cb->listener_fd;
-               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_fd,&new_event);
+               new_event.data.ptr = &cb->listener_socket_entry;
+               epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,cb->listener_socket_entry.fd,&new_event);
                if(new_sock > 0) {
                    new_event.events = g_trigger;
                    if(cb->rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
@@ -412,21 +440,21 @@ static void do_sock_test_left_side(cb_t *cb)
   	                   new_event.events |= EPOLLIN;
                        } 
                    }
-                   new_event.data.fd = new_sock;
+                   new_event.data.ptr = p_socket_entry;
                    epoll_ctl(cb->epoll_fd,EPOLL_CTL_ADD,new_sock,&new_event);
                }
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & (RX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
+           if((&cb->listener_socket_entry != events[i].data.ptr)&&(events[i].events & EPOLLIN)&&(cb->rxtx_flag & (RX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
                if(cb->type == MODE_TCP)
-                   do_tcp_sock_read(cb,events[i].data.fd);
+                   do_tcp_sock_read(cb,events[i].data.ptr);
                else
-                   do_udp_sock_read(cb,events[i].data.fd);
+                   do_udp_sock_read(cb,events[i].data.ptr);
            }
-           if((cb->listener_fd != events[i].data.fd)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & (TX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
+           if((&cb->listener_socket_entry != events[i].data.ptr)&&(events[i].events & EPOLLOUT)&&(cb->rxtx_flag & (TX_ON|LATENCY_CLIENT|LATENCY_SERVER))) {
                if(cb->type == MODE_TCP)
-                   do_tcp_sock_write(cb,events[i].data.fd);
+                   do_tcp_sock_write(cb,events[i].data.ptr);
                else
-                   do_udp_sock_write(cb,events[i].data.fd);
+                   do_udp_sock_write(cb,events[i].data.ptr);
            }
        }
        /*iterations++;
@@ -509,6 +537,9 @@ void init_test(int buf_sz,
 {
     int idx;
     cpu_set_t cpuset;
+
+    TAILQ_INIT(&g_read_q);
+    TAILQ_INIT(&g_write_q);
    
     if(rxtx_flag & (LATENCY_CLIENT|LATENCY_SERVER)) {
         if(number_of_threads > 1) {
