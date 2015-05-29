@@ -307,7 +307,7 @@ static void do_tcp_sock_read(cb_t *cb, struct socket_entry* p_socket_entry)
                     epoll_ctl(cb->epoll_fd,EPOLL_CTL_MOD,p_socket_entry->fd,&new_event);
                 }
             }
-	    else if(read_this_time > (cb->buf_size << 10)) {
+	    else if(read_this_time > (cb->buf_size << 8)) {
 		if (!p_socket_entry->is_in_read_q) {
 			insert_into_read_queue(cb, p_socket_entry);
 		}
@@ -325,7 +325,7 @@ static void do_tcp_sock_read(cb_t *cb, struct socket_entry* p_socket_entry)
 
 static void do_udp_sock_read(cb_t *cb,struct socket_entry* p_socket_entry)
 {
-    int rc,addr_len;
+    int rc,addr_len,read_this_time = 0;
     struct sockaddr *sa;
     struct sockaddr_in sockaddrin;
     sa = (struct sockaddr *)&sockaddrin;
@@ -334,6 +334,13 @@ static void do_udp_sock_read(cb_t *cb,struct socket_entry* p_socket_entry)
     	rc = recvfrom(p_socket_entry->fd,cb->buffer,cb->buf_size,0,sa,&addr_len);
         if(rc > 0) {
             __sync_fetch_and_add(&total_read,rc);
+	    read_this_time += rc;
+	    if(read_this_time > (cb->buf_size << 2)) {
+	        if (!p_socket_entry->is_in_read_q) {
+			insert_into_read_queue(cb, p_socket_entry);
+		}
+		break;
+	    }
         }
         else {
             break;
@@ -395,7 +402,7 @@ static void do_tcp_sock_write(cb_t *cb, struct socket_entry* p_socket_entry)
         if(rc > 0) {
             __sync_fetch_and_add(&total_written,rc);
 	   written_this_time += rc;
-	    if(written_this_time > (cb->buf_size << 10)) {
+	    if(written_this_time > (cb->buf_size << 8)) {
 		if (!p_socket_entry->is_in_write_q) {
 			insert_into_write_queue(cb, p_socket_entry);
 		}
@@ -427,6 +434,12 @@ static void do_udp_sock_write(cb_t *cb,struct socket_entry* p_socket_entry)
         if(rc > 0) {
 	    written_this_time += rc;
             __sync_fetch_and_add(&total_written,rc);
+	    if(written_this_time > (cb->buf_size << 2)) {
+		if (!p_socket_entry->is_in_write_q) {
+			insert_into_write_queue(cb, p_socket_entry);
+		}
+		break;
+	    }
         }
         else {
             break;
