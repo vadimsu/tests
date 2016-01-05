@@ -134,7 +134,7 @@ static void init_server_sock(cb_t *cb)
     }
 
     sockaddrin.sin_family = AF_INET;
-    sockaddrin.sin_port = cb->client_side_port_base;
+    sockaddrin.sin_port = htons(cb->client_side_port_base);
     sockaddrin.sin_addr.s_addr = cb->server_ip;
     sa = (struct sockaddr *)&sockaddrin;
     len = sizeof(sockaddrin);
@@ -174,7 +174,7 @@ static void init_client_socket(cb_t *cb)
     int family = (cb->type == 1) ? SOCK_STREAM : SOCK_DGRAM;
     struct socket_entry *p_socket_entry = malloc(sizeof(struct socket_entry));
     sockaddrin.sin_family = AF_INET;
-    sockaddrin.sin_port = cb->server_side_port_base;
+    sockaddrin.sin_port = htons(cb->server_side_port_base);
     sockaddrin.sin_addr.s_addr = cb->client_ip;
     sa = (struct sockaddr *)&sockaddrin;
     len = sizeof(sockaddrin);
